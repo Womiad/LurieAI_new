@@ -1,0 +1,67 @@
+@bot.tree.command(name = "vc", description = "進入語音頻道")
+async def vc(interaction: discord.Interaction):
+    voiceChannel = bot.get_channel(1196487874800013395)
+    voiceClient = await voiceChannel.connect(cls=voice_recv.VoiceRecvClient)
+    await interaction.response.send_message("vc")
+
+    audio_chunks = []
+    silence_timer = None
+
+    def reset_silence_timer():
+        nonlocal silence_timer
+        if silence_timer is not None:
+            silence_timer.cancel()
+        silence_timer = threading.Timer(1.0, process_audio)
+        silence_timer.start()
+
+    def process_audio():
+        nonlocal audio_chunks, silence_timer
+        if not audio_chunks:
+            return
+        silence_timer = None
+
+        combined_audio = AudioSegment.empty()
+        for chunk in audio_chunks:
+            combined_audio += chunk
+        audio_chunks = []
+
+        wav_io = io.BytesIO()
+        # combined_audio.export(wav_io, format="wav")
+        combined_audio.export("output1.wav", format="wav")
+
+        wav_io.seek(0)
+
+        r = sr.Recognizer()
+
+        sound = AudioSegment.from_file("output1.wav")
+        sound = sound.set_frame_rate(48000)
+        sound.export("output_modified.wav", format="wav")
+
+        WAV = sr.AudioFile("output_modified.wav")
+
+        with WAV as source:
+            audio = r.record(source)
+
+        try:
+            print(r.recognize_google(audio, show_all=True, language='zh-TW')["alternative"][0]["transcript"])
+        except sr.RequestError as e:
+            print(f"Could not request results from Google Speech Recognition service; {e}")
+        except sr.UnknownValueError:
+            print("Google Speech Recognition could not understand audio")
+
+    def callback(user, data: voice_recv.VoiceData):
+        nonlocal audio_chunks
+        raw_data = data.pcm
+
+        audio_chunk = AudioSegment(
+            data = raw_data,
+            sample_width = 2,
+            frame_rate = 96000,
+            channels = 1
+        )
+        audio_chunks.append(audio_chunk)
+        reset_silence_timer()
+        
+
+
+    voiceClient.listen(voice_recv.BasicSink(callback))

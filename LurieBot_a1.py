@@ -117,27 +117,41 @@ async def vc(interaction: discord.Interaction):
 
         wav_io.seek(0)
 
-        # recognizer = sr.Recognizer()
-        # audio_file = sr.AudioFile("output1.wav")
-        # with audio_file as source:
-        #     audio = recognizer.record(source)
-        #     try:
-        #         text = recognizer.recognize_google(audio, language='zh-TW')
-        #         print(f"辨識結果: {text}")
-        #     except sr.UnknownValueError:
-        #         print("Google Speech Recognition 無法理解音訊")
-        #     except sr.RequestError as e:
-        #         print(f"無法請求 Google Speech Recognition 服務; {e}")
+        r = sr.Recognizer()
+
+        sound = AudioSegment.from_file("output1.wav")
+        sound = sound.set_frame_rate(48000)
+        sound.export("output_modified.wav", format="wav")
+
+        WAV = sr.AudioFile("output_modified.wav")
+
+        with WAV as source:
+            audio = r.record(source)
+
+        try:
+            result = r.recognize_google(audio, show_all=True, language='zh-TW')["alternative"][0]["transcript"]
+            print(result)
+
+            #復讀機
+            theReturn = generate(result,language="ZH")
+            print(theReturn)#print出返回的音檔路徑
+            interaction.guild.voice_client.play(discord.FFmpegPCMAudio("voice/" + theReturn))
+
+
+        except sr.RequestError as e:
+            print(f"Could not request results from Google Speech Recognition service; {e}")
+        except sr.UnknownValueError:
+            print("Google Speech Recognition could not understand audio")
 
     def callback(user, data: voice_recv.VoiceData):
         nonlocal audio_chunks
         raw_data = data.pcm
 
         audio_chunk = AudioSegment(
-            data=raw_data,
-            sample_width=2,
-            frame_rate=96000,
-            channels=1
+            data = raw_data,
+            sample_width = 2,
+            frame_rate = 96000,
+            channels = 1
         )
         audio_chunks.append(audio_chunk)
         reset_silence_timer()
