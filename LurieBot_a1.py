@@ -146,63 +146,6 @@ async def vc(interaction: discord.Interaction):
 
     voiceClient.listen(voice_recv.BasicSink(callback))
 
-# @bot.tree.command(name="vc", description="進入語音頻道")
-# async def vc(interaction: discord.Interaction):
-#     voiceChannel = bot.get_channel(1196487874800013395)
-#     voiceClient = await voiceChannel.connect(cls=voice_recv.VoiceRecvClient)
-#     await interaction.response.send_message("vc")
-
-#     audio_chunks = []
-#     silence_timer = None
-
-#     def reset_silence_timer():
-#         nonlocal silence_timer
-#         if silence_timer is not None:
-#             silence_timer.cancel()
-#         silence_timer = threading.Timer(1.0, process_audio)
-#         silence_timer.start()
-
-#     def process_audio():
-#         nonlocal audio_chunks, silence_timer
-#         if not audio_chunks:
-#             return
-#         silence_timer = None
-
-#         combined_audio = AudioSegment.empty()
-#         for chunk in audio_chunks:
-#             combined_audio += chunk
-#         audio_chunks = []
-
-#         # Export combined audio to WAV format
-#         wav_io = io.BytesIO()
-#         combined_audio.export(wav_io, format="wav")
-#         wav_io.seek(0)
-
-#         # Recognize speech using WhisperModel
-#         wav_io.seek(0)
-#         segments, info = model.transcribe(wav_io, beam_size=5)
-
-#         print(f"Detected language '{info.language}' with probability {info.language_probability}")
-
-#         for segment in segments:
-#             print(f"[{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}")
-
-#     def callback(user, data: voice_recv.VoiceData):
-#         nonlocal audio_chunks
-#         raw_data = data.pcm
-
-#         audio_chunk = AudioSegment(
-#             data=raw_data,
-#             sample_width=2,
-#             frame_rate=48000,
-#             channels=1
-#         )
-#         audio_chunks.append(audio_chunk)
-#         reset_silence_timer()
-
-#     voiceClient.listen(voice_recv.BasicSink(callback))
-
-
 with open("token.json","r") as file:
     token=json.load(file)["token"]
 bot.run(token)
