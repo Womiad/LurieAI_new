@@ -1,44 +1,17 @@
-import llmControl
+from openai import OpenAI
 
 class LurieAI():
 
-    #屬性
-    #self.hyp
-    #self.llm
-
     def __init__(self) -> None:
 
-        self.hyp=0
-        self.llm=llmControl.Gemini()
+        path = 'openAIkey.txt'
+        f = open(path, 'r')
+        mykey = f.read()
+        f.close()
 
-    #生成prompt
-    def prompt(self,user, msg):
-        prompt = user + msg
-        #每5句洗一次腦
-        if(self.hyp % 5 == 0):
-            prompt = self.getSystemPrompt() + user + msg
-        return prompt
-
-    #取得琉璃回應(array)
-    def getResponse(self,user, msg):
-        #若訊息為空不回應
-        if msg=="":
-            return "input error"
-        #認人
-        _user = self.tellUser(user.id)
-        #取得prompt
-        prompt = self.prompt(_user, msg)
-        #洗腦計數器+1
-        self.hyp+=1
-        #嘗試獲得回覆
-        try:
-            response = self.llm.sendMsg(prompt)
-            return [response]
-        except:
-            return ["filtered",response.prompt_feedback]
-
-    #閱讀系統prompt
-    def getSystemPrompt(self):
+        self.client = OpenAI(
+            api_key = mykey
+        )
 
         path = 'memories/systemPrompt.txt'
         f = open(path, 'r')
@@ -55,33 +28,36 @@ class LurieAI():
         charactors = f.read()
         f.close()
 
-        configPrompt = systemPrompt.replace("[personality]",personality).replace("[charactors]",charactors)
+        configPrompt = systemPrompt.replace("[personality]",personality).replace("[charactors]","") # charactors為認人用，暫不實裝
+        self.msg = [
+            {
+                "role": "system",
+                "name": "Lurie",
+                "content": configPrompt
+            },
+        ]
 
-        return configPrompt
-    
-    #辨別使用者(DiscordId -> str)
-    def tellUser(self, UserId):
-        if UserId == 363682541145948162:
-            user = "埃德："
-        elif UserId == 708940692235354154:
-            user = "堆堆："
-        elif UserId == 660472882014584842:
-            user = "琴："
-        elif UserId == 615187548351758336:
-            user = "塔克："
-        else:
-            user = "陌生人："
-        return user
-    
-    #開機訊息(array)
-    def getOpenMsg(self):
+    def getResponse(self, inputText):
+        self.msg.append({"role": "user", "content": inputText})
+        stream = self.client.chat.completions.create(
+            model = "gpt-3.5-turbo-0125",
+            messages = self.msg,
+            stream = True,
+        )
+        content = ""
+        for chunk in stream:
+            if chunk.choices[0].delta.content is not None:
+                # print(chunk.choices[0].delta.content, end="")
+                content += chunk.choices[0].delta.content
+        self.msg.append({"role": "assistant", "content": content})
+        if(len(self.msg)>10):
+            self.msg.pop(1)
 
-        introStstemPrompt = self.getSystemPrompt()
-        prompt = self.prompt(introStstemPrompt, "開機了，請妳向大家問好")
+        return content
 
-        try:
-            response = self.llm.sendMsg(prompt)
-            return [response]
-        except:
-            return ["filtered",response.prompt_feedback]
-        
+if(__name__=="__main__"):
+    Lurie = LurieAI()
+
+    while True:
+        user_input = input("user:")
+        print("琉璃：" + Lurie.getResponse(user_input))

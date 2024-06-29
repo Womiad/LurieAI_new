@@ -7,8 +7,7 @@ import speech_recognition as sr
 import io
 from pydub import AudioSegment
 import threading
-from faster_whisper import WhisperModel
-# import LurieAI
+import LurieAI
 
 from vits.generateApi import generate
 
@@ -27,24 +26,15 @@ async def on_ready():
     print(f"目前登入身份 --> {bot.user}")
     print(f"載入 {len(slash)} 個斜線指令")
 
-    # global Lurie
+    global Lurie
     global LurieChannel
     global LogChannel
 
     LurieChannel = bot.get_channel(1196487874800013394)
     LogChannel = bot.get_channel(1212309865305735188)
     print("online")
-    # Lurie = LurieAI.LurieAI()
-
-    #琉璃會在小木屋自我介紹
-    # response = Lurie.getOpenMsg()
-    # await LurieChannel.send("online")
-
-    #紀錄
-    # if(response[0] == "filtered"):
-    #     await LogChannel.send(f"{response[1]}")
-    # else:
-    #     await LogChannel.send(f"```琉璃(開機訊息):{response[0]}```")
+    Lurie = LurieAI.LurieAI()
+    await LurieChannel.send("online")
 
 @bot.event
 async def on_message(message):
@@ -55,8 +45,9 @@ async def on_message(message):
         return
     
     # response = Lurie.getResponse(message.author,message.content)
+    response = Lurie.getResponse(message.content)
     channel = message.channel
-    # await channel.send(response[0])
+    await channel.send(response)
 
     # #紀錄
     # await LogChannel.send(f"```{Lurie.tellUser(message.author.id)+message.content}```")
@@ -65,7 +56,8 @@ async def on_message(message):
     # else:
     #     await LogChannel.send(f"```琉璃:{response[0]}```")
     #     await LogChannel.send(f"洗腦值：{Lurie.hyp}")
-    await channel.send("0")
+
+    # await channel.send("0")
 
 @bot.tree.command(name = "say", description = "叫琉璃說話a")
 async def say(interaction: discord.Interaction, text: str):
@@ -132,10 +124,23 @@ async def vc(interaction: discord.Interaction):
             result = r.recognize_google(audio, show_all=True, language='zh-TW')["alternative"][0]["transcript"]
             print(result)
 
+            LurieResponse = Lurie.getResponse(result)
+
             #復讀機
-            theReturn = generate(result,language="ZH")
-            print(theReturn)#print出返回的音檔路徑
-            interaction.guild.voice_client.play(discord.FFmpegPCMAudio("voice/" + theReturn))
+            
+            try:
+                theReturn = generate(LurieResponse,language="ZH")
+                print(theReturn)#print出返回的音檔路徑
+
+                try:
+                    interaction.guild.voice_client.play(discord.FFmpegPCMAudio("voice/" + theReturn))
+                except:
+                    print("播放" + theReturn + "時出現錯誤")
+
+            except:
+                print("生成語音時發生錯誤："+ result)
+
+            
 
 
         except sr.RequestError as e:
