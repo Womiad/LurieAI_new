@@ -40,7 +40,7 @@ class LurieAI():
     def getResponse(self, inputText):
         self.msg.append({"role": "user", "content": inputText})
         stream = self.client.chat.completions.create(
-            model = "gpt-3.5-turbo-0125",
+            model = "gpt-4o-mini",
             messages = self.msg,
             stream = True,
         )

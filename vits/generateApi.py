@@ -76,4 +76,4 @@ def generate(text, noise_scale=.667, noise_scale_w=.6, length=.8, language="Mix"
 
 
 if __name__ == "__main__":
-    generate("測試，第三次", language="ZH")
+    generate("救命啊", language="ZH")
