@@ -55,9 +55,16 @@ async def on_message(message):
     if ((message.channel.id==1196487874800013394 or message.channel.id==1212399293852291092) == False):
         return
     
+    global isThinking
+    channel = message.channel
+
+    if (isThinking==True):
+        await channel.send(content="琉璃現在在忙喔")
+        return
+    
     # response = Lurie.getResponse(message.author,message.content)
     response = Lurie.getResponse(message.content)
-    channel = message.channel
+    
     await channel.send(response)
 
 @bot.tree.command(name = "say", description = "叫琉璃說話")
@@ -154,12 +161,13 @@ async def vc(interaction: discord.Interaction):
 
         try:
             result = r.recognize_google(audio, show_all=True, language='zh-TW')["alternative"][0]["transcript"]
-            print(result)
+            user = Lurie.recognizeUser(interaction.user.name) + "："
+            print(user + result)
 
             global getSttTime
             getSttTime = datetime.datetime.now()
 
-            LurieResponse = Lurie.getResponse(result)
+            LurieResponse = Lurie.getResponse(user + result)
             LurieResponse = LurieResponse.replace("\n","。")
 
             # split_response = split_content(LurieResponse)
@@ -211,7 +219,7 @@ async def vc(interaction: discord.Interaction):
                     getTextResponseTime = (getLurieResponseTime - getSttTime).total_seconds()
                     TtsTotalTime = (getAudioReturnTime - getLurieResponseTime).total_seconds()
                     TotalLurieResponseTime = SttTotalTime + getTextResponseTime + TtsTotalTime
-                    timeLog = f"```stt花費時間:{SttTotalTime}秒\n回答生成花費時間:{getTextResponseTime}秒\ntts花費時間:{TtsTotalTime}秒\n總花費時間:{TotalLurieResponseTime}秒```"
+                    timeLog = f"```stt花費時間:{SttTotalTime}秒\n回答生成花費時間:{getTextResponseTime}秒\ntts花費時間:{TtsTotalTime}秒\n總花費時間:{TotalLurieResponseTime}秒\nuser:{interaction.user.name}```"
                     bot.loop.create_task(LogChannel.send(logMsg + timeLog))
                     
                 except:

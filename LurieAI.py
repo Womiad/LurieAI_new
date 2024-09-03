@@ -28,7 +28,7 @@ class LurieAI():
         charactors = f.read()
         f.close()
 
-        configPrompt = systemPrompt.replace("[personality]",personality).replace("[charactors]","") # charactors為認人用，暫不實裝
+        configPrompt = systemPrompt.replace("[personality]",personality).replace("[charactors]",charactors) # charactors為認人用，暫不實裝
         self.msg = [
             {
                 "role": "system",
@@ -54,6 +54,12 @@ class LurieAI():
             self.msg.pop(1)
 
         return content
+    
+    def recognizeUser(self, name):
+        if(name == "womiad"):
+            return "埃德"
+        else:
+            return name
 
 if(__name__=="__main__"):
     Lurie = LurieAI()
