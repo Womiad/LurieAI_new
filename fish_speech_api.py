@@ -1,111 +1,97 @@
-import base64
 import datetime
-import json
+import os
 from pathlib import Path
-import pyaudio
+
 import requests
 from to_simple_zh import to_simple_zh
 
 
-def wav_to_base64(file_path):
-    if not file_path or not Path(file_path).exists():
-        return None
-    with open(file_path, "rb") as wav_file:
-        wav_content = wav_file.read()
-        base64_encoded = base64.b64encode(wav_content)
-        return base64_encoded.decode("utf-8")
+FISH_TTS_URL = "https://api.fish.audio/v1/tts"
 
 
-def play_audio(audio_content, format, channels, rate):
-    p = pyaudio.PyAudio()
-    stream = p.open(format=format, channels=channels, rate=rate, output=True)
-    stream.write(audio_content)
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+def read_secret(env_name, file_name):
+    value = os.environ.get(env_name)
+    if value:
+        return value.strip()
 
+    path = Path(file_name)
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+
+    return None
 
 
 def synthesize_audio(
-    url,
     text,
-    reference_audio=None,
-    reference_text=None,
+    reference_id=None,
+    api_key=None,
+    model="s2-pro",
     max_new_tokens=1024,
-    chunk_length=100,
+    chunk_length=300,
     top_p=0.7,
     repetition_penalty=1.2,
     temperature=0.7,
-    speaker=None,
-    emotion=None,
     audio_format="wav",
-    streaming=False,
-    channels=1,
-    rate=44100,
-    output_dir="./voice"
+    sample_rate=44100,
+    output_dir="./voice",
 ):
-    base64_audio = wav_to_base64(reference_audio)
+    api_key =  read_secret("FISH_API_KEY", "fishAPIkey.txt")
+    if not api_key:
+        raise RuntimeError("Fish Audio API key is missing.")
 
-    text = to_simple_zh(text)
+    reference_id = read_secret("FISH_REFERENCE_ID", "fishReferenceId.txt")
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     data = {
-        "text": text,
-        "reference_text": reference_text,
-        "reference_audio": base64_audio,
-        "max_new_tokens": max_new_tokens,
-        "chunk_length": chunk_length,
+        "text": to_simple_zh(text),
         "top_p": top_p,
-        "repetition_penalty": repetition_penalty,
         "temperature": temperature,
-        "speaker": speaker,
-        "emotion": emotion,
+        "chunk_length": chunk_length,
+        "normalize": True,
         "format": audio_format,
-        "streaming": streaming,
+        "sample_rate": sample_rate,
+        "max_new_tokens": max_new_tokens,
+        "repetition_penalty": repetition_penalty,
+        "latency": "normal",
+        "prosody": {
+            "speed": 1,
+            "volume": 0,
+            "normalize_loudness": True,
+        },
     }
 
-    response = requests.post(url, json=data, stream=streaming)
+    if reference_id:
+        data["reference_id"] = reference_id
 
-    audio_format = pyaudio.paInt16  # Assuming 16-bit PCM format
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "model": model,
+    }
 
-    if response.status_code == 200:
-        if streaming:
-            p = pyaudio.PyAudio()
-            stream = p.open(
-                format=audio_format, channels=channels, rate=rate, output=True
-            )
-            for chunk in response.iter_content(chunk_size=1024):
-                if chunk:
-                    stream.write(chunk)
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-        else:
-            audio_content = response.content
-
-            # 获取当前日期时间
-            current_datetime = datetime.datetime.now()
-            # 将日期时间对象转换为字符串
-            datetime_str = current_datetime.strftime("%Y-%m-%d-%H-%M-%S")
-            output_file_path = Path(output_dir) / f"{datetime_str}.wav"
-
-            with open(output_file_path, "wb") as audio_file:
-                audio_file.write(audio_content)
-            print(f"Audio has been saved to '{output_file_path}'.")
-
-            return f"{datetime_str}.wav"
-    else:
-        print(f"Request failed with status code {response.status_code}")
-        print(response.json())
+    response = requests.post(FISH_TTS_URL, headers=headers, json=data, timeout=120)
+    if response.status_code != 200:
+        print(f"Fish Audio request failed with status code {response.status_code}")
+        try:
+            print(response.json())
+        except ValueError:
+            print(response.text)
         return None
-    
+
+    datetime_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    file_name = f"{datetime_str}.{audio_format}"
+    output_file_path = output_path / file_name
+    output_file_path.write_bytes(response.content)
+    print(f"Audio has been saved to '{output_file_path}'.")
+
+    return file_name
+
+
 def fish_generate(_text):
-    # Example usage:
-    return synthesize_audio(
-        url="http://127.0.0.1:8080/v1/invoke",
-        text=_text,
-        reference_audio="Lurie-zh-fishspeech02.wav",
-        reference_text="你说得对，但是《原神》是由米哈游自主研发的一款全新开放世界冒险游戏。游戏发生在一个被称作「提瓦特」的幻想世界，"
-    )
+    return synthesize_audio(text=_text)
+
 
 if __name__ == "__main__":
     fish_generate("晚安呀人類！希望你有美夢，琉璃會在這裡等你明天回來哦~ 晚安呀~")

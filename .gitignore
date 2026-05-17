@@ -3,4 +3,8 @@ token.json
 vits-fast-fine-tuning-model
 *.pth
 openAIkey.txt
+fishAPIkey.txt
+fishReferenceId.txt
 chatGptTest.py
+__pycache__/
+*.pyc

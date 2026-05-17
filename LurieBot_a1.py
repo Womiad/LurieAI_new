@@ -1,22 +1,75 @@
 import discord
+import discord.opus
+import davey
 from discord import app_commands
 import json
 import nacl
+from pathlib import Path
 from discord.ext import commands, voice_recv
+import discord.ext.voice_recv.opus as voice_recv_opus
+import discord.ext.voice_recv.rtp as voice_recv_rtp
 import speech_recognition as sr
-import io
 from pydub import AudioSegment
 import threading
 import LurieAI
 import asyncio
 import datetime
 import re
+from openai import OpenAIError, RateLimitError
 from audio2mouth import audio2mouth
 from fish_speech_api import fish_generate
 
 from vits.generateApi import generate
 
 
+opus_path = Path(discord.__file__).parent / "bin" / "libopus-0.x64.dll"
+if not discord.opus.is_loaded() and opus_path.exists():
+    discord.opus.load_opus(str(opus_path))
+    print(f"Loaded opus library: {opus_path}")
+
+
+def _parse_bede_header_fixed(self, data, length):
+    offset = 4
+    end = 4 + length * 4
+
+    while offset < end:
+        next_byte = data[offset : offset + 1]
+        if next_byte == b"\x00":
+            offset += 1
+            continue
+
+        header = next_byte[0]
+        element_id = header >> 4
+        element_len = 1 + (header & 0b0000_1111)
+        self.extension_data[element_id] = data[offset + 1 : offset + 1 + element_len]
+        offset += 1 + element_len
+
+
+voice_recv_rtp.RTPPacket._parse_bede_header = _parse_bede_header_fixed
+
+_original_decode_packet = voice_recv_opus.PacketDecoder._decode_packet
+
+
+def _decode_packet_with_dave(self, packet):
+    if packet:
+        voice_client = self.sink.voice_client
+        user_id = voice_client._get_id_from_ssrc(packet.ssrc)
+        dave_session = voice_client._connection.dave_session
+
+        if user_id is not None and dave_session is not None and dave_session.ready:
+            try:
+                packet.decrypted_data = dave_session.decrypt(
+                    user_id,
+                    davey.MediaType.audio,
+                    packet.decrypted_data,
+                )
+            except Exception as e:
+                print(f"DAVE decrypt failed for user {user_id}: {e}")
+
+    return _original_decode_packet(self, packet)
+
+
+voice_recv_opus.PacketDecoder._decode_packet = _decode_packet_with_dave
 
 intents = discord.Intents.all()
 intents.members = True 
@@ -63,8 +116,26 @@ async def on_message(message):
         return
     
     # response = Lurie.getResponse(message.author,message.content)
-    response = Lurie.getResponse(message.content)
-    
+    isThinking = True
+    try:
+        response = Lurie.getResponse(message.content)
+    except RateLimitError as e:
+        error_code = getattr(e, "code", None)
+        if error_code == "insufficient_quota":
+            response = "OpenAI API 額度不足或帳單尚未啟用，請主人檢查一下 Platform 的 billing / credits。"
+        else:
+            response = "OpenAI API 目前請求太頻繁，請稍等一下再試。"
+    except OpenAIError:
+        response = "OpenAI API 連線或服務發生錯誤，請稍後再試。"
+    except Exception as e:
+        print(f"on_message error: {e}")
+        response = "琉璃這邊發生了一點錯誤，請稍後再試。"
+    finally:
+        isThinking = False
+
+    if response is None or response.strip() == "":
+        response = "琉璃剛剛沒有收到可發送的回覆，請再試一次。"
+
     await channel.send(response)
 
 @bot.tree.command(name = "say", description = "叫琉璃說話")
@@ -96,10 +167,39 @@ async def say(interaction: discord.Interaction, text: str):
 @bot.tree.command(name = "vc", description = "進入語音頻道")
 async def vc(interaction: discord.Interaction):
 
+    await interaction.response.defer()
 
     voiceChannel = bot.get_channel(1196487874800013395)
-    voiceClient = await voiceChannel.connect(cls=voice_recv.VoiceRecvClient)
-    await interaction.response.send_message("vc")
+    if voiceChannel is None:
+        await interaction.followup.send("找不到指定的語音頻道。")
+        return
+
+    voiceClient = interaction.guild.voice_client
+    try:
+        if voiceClient is not None and voiceClient.is_connected():
+            if voiceClient.channel.id != voiceChannel.id:
+                await voiceClient.move_to(voiceChannel)
+        else:
+            if voiceClient is not None:
+                await voiceClient.disconnect(force=True)
+            voiceClient = await voiceChannel.connect(cls=voice_recv.VoiceRecvClient, timeout=15.0, reconnect=False)
+    except asyncio.TimeoutError:
+        await interaction.followup.send("連接語音頻道逾時，請稍後再試。")
+        return
+    except discord.ClientException as e:
+        print(f"voice connect client error: {e}")
+        await interaction.followup.send("語音連線狀態異常，請稍後再試。")
+        return
+    except Exception as e:
+        print(f"voice connect error: {e}")
+        if interaction.guild.voice_client is not None:
+            await interaction.guild.voice_client.disconnect(force=True)
+        await interaction.followup.send("語音連線失敗，已清理連線狀態，請再試一次。")
+        return
+
+    await interaction.followup.send("vc")
+    print(f"voice encryption mode: {voiceClient.mode}")
+    print(f"dave protocol version: {voiceClient._connection.dave_protocol_version}")
 
     audio_chunks = []
     silence_timer = None
@@ -131,6 +231,7 @@ async def vc(interaction: discord.Interaction):
 
         nonlocal audio_chunks, silence_timer
         if not audio_chunks:
+            isThinking = False
             return
         silence_timer = None
 
@@ -139,16 +240,12 @@ async def vc(interaction: discord.Interaction):
             combined_audio += chunk
         audio_chunks = []
 
-        wav_io = io.BytesIO()
-        # combined_audio.export(wav_io, format="wav")
-        combined_audio.export("output1.wav", format="wav")
-
-        wav_io.seek(0)
-
         r = sr.Recognizer()
 
+        combined_audio.export("output1.wav", format="wav")
+
         sound = AudioSegment.from_file("output1.wav")
-        sound = sound.set_frame_rate(48000)
+        sound = sound.set_channels(1).set_frame_rate(16000).set_sample_width(2)
         sound.export("output_modified.wav", format="wav")
 
         WAV = sr.AudioFile("output_modified.wav")
@@ -160,7 +257,10 @@ async def vc(interaction: discord.Interaction):
         LogChannel = bot.get_channel(1212309865305735188)
 
         try:
-            result = r.recognize_google(audio, show_all=True, language='zh-TW')["alternative"][0]["transcript"]
+            stt_result = r.recognize_google(audio, show_all=True, language='zh-TW')
+            if not stt_result or "alternative" not in stt_result or len(stt_result["alternative"]) == 0:
+                raise sr.UnknownValueError()
+            result = stt_result["alternative"][0]["transcript"]
             user = Lurie.recognizeUser(interaction.user.name) + "："
             print(user + result)
 
@@ -272,15 +372,29 @@ async def vc(interaction: discord.Interaction):
         audio_chunk = AudioSegment(
             data = raw_data,
             sample_width = 2,
-            frame_rate = 96000,
-            channels = 1
+            frame_rate = 48000,
+            channels = 2
         )
         audio_chunks.append(audio_chunk)
         reset_silence_timer()
 
 
-    if (not interaction.guild.voice_client.is_playing()):
+    if (voiceClient is not None and not voiceClient.is_playing()):
+        print(f"opus loaded before listen: {discord.opus.is_loaded()}")
         voiceClient.listen(voice_recv.BasicSink(callback))
+
+@bot.tree.command(name = "shutdown", description = "關閉琉璃")
+async def shutdown(interaction: discord.Interaction):
+    if interaction.user.guild_permissions.administrator == False:
+        await interaction.response.send_message("只有管理員可以關閉琉璃。", ephemeral=True)
+        return
+
+    await interaction.response.send_message("琉璃要先下線了。")
+
+    if interaction.guild.voice_client is not None:
+        await interaction.guild.voice_client.disconnect(force=True)
+
+    await bot.close()
 
 with open("token.json","r") as file:
     token=json.load(file)["token"]

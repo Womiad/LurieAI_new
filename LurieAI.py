@@ -37,11 +37,11 @@ class LurieAI():
             },
         ]
 
-    def getResponse(self, inputText):
-        self.msg.append({"role": "user", "content": inputText})
+    def _stream_response(self, model):
         stream = self.client.chat.completions.create(
-            model = "gpt-4o-mini",
+            model = model,
             messages = self.msg,
+            max_completion_tokens = 300,
             stream = True,
         )
         content = ""
@@ -49,6 +49,17 @@ class LurieAI():
             if chunk.choices[0].delta.content is not None:
                 # print(chunk.choices[0].delta.content, end="")
                 content += chunk.choices[0].delta.content
+        return content.strip()
+
+    def getResponse(self, inputText):
+        self.msg.append({"role": "user", "content": inputText})
+        content = self._stream_response("gpt-5-nano")
+        if content == "":
+            print("gpt-5-nano returned an empty response, retrying with gpt-4.1-nano")
+            content = self._stream_response("gpt-4.1-nano")
+        if content == "":
+            content = "琉璃剛剛沒有收到可發送的回覆，請再試一次。"
+
         self.msg.append({"role": "assistant", "content": content})
         if(len(self.msg)>10):
             self.msg.pop(1)
