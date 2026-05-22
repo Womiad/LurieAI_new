@@ -65,6 +65,9 @@ class LurieAI():
             self.msg.pop(1)
 
         return content
+
+    def get_recent_messages(self):
+        return list(self.msg)
     
     def recognizeUser(self, name):
         if(name == "womiad"):

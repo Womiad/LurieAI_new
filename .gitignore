@@ -1,4 +1,5 @@
 token.json
+.env
 *.wav
 vits-fast-fine-tuning-model
 *.pth

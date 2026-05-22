@@ -17,6 +17,7 @@ import datetime
 import re
 from openai import OpenAIError, RateLimitError
 from audio2mouth import audio2mouth
+from background_system import BackgroundGenerationSystem
 from fish_speech_api import fish_generate
 
 from vits.generateApi import generate
@@ -78,6 +79,7 @@ bot = commands.Bot(command_prefix="/", intents=intents)
 
 logMsg = ""
 isThinking = False
+backgroundSystem = None
 
 
 
@@ -93,11 +95,30 @@ async def on_ready():
 
     global Lurie
     global LurieChannel
+    global backgroundSystem
 
     LurieChannel = bot.get_channel(1196487874800013394)
     print("online")
     Lurie = LurieAI.LurieAI()
+    backgroundSystem = BackgroundGenerationSystem(openai_client=Lurie.client)
     await LurieChannel.send("online")
+
+
+def schedule_background_generation(user_text, response_text, source_label, destination_channel=None):
+    if backgroundSystem is None:
+        return
+
+    if destination_channel is None:
+        destination_channel = bot.get_channel(backgroundSystem.config.log_channel_id)
+    context_messages = Lurie.get_recent_messages()
+    coroutine = backgroundSystem.generate_for_discord(
+        context_messages=context_messages,
+        user_text=user_text,
+        response_text=response_text,
+        destination_channel=destination_channel,
+        source_label=source_label,
+    )
+    bot.loop.call_soon_threadsafe(lambda: bot.loop.create_task(coroutine))
 
 
 @bot.event
@@ -137,6 +158,12 @@ async def on_message(message):
         response = "琉璃剛剛沒有收到可發送的回覆，請再試一次。"
 
     await channel.send(response)
+    schedule_background_generation(
+        message.content,
+        response,
+        f"文字頻道 #{message.channel.name}",
+        destination_channel=message.channel,
+    )
 
 @bot.tree.command(name = "say", description = "叫琉璃說話")
 async def say(interaction: discord.Interaction, text: str):
@@ -274,6 +301,7 @@ async def vc(interaction: discord.Interaction):
 
             global getLurieResponseTime
             getLurieResponseTime = datetime.datetime.now()
+            schedule_background_generation(result, LurieResponse, f"語音頻道 {interaction.user.name}")
 
             #回覆&log
             global logMsg
