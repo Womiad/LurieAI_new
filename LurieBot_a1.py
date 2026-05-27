@@ -76,6 +76,10 @@ intents = discord.Intents.all()
 intents.members = True 
 bot = commands.Bot(command_prefix="/", intents=intents)
 
+VOICE_CHANNEL_ID = 1196487874800013395
+VOICE_CONNECT_TIMEOUT = 30.0
+voice_connect_lock = asyncio.Lock()
+
 
 logMsg = ""
 isThinking = False
@@ -196,37 +200,67 @@ async def vc(interaction: discord.Interaction):
 
     await interaction.response.defer()
 
-    voiceChannel = bot.get_channel(1196487874800013395)
+    if interaction.guild is None:
+        await interaction.followup.send("這個指令只能在伺服器裡使用。")
+        return
+
+    voiceChannel = bot.get_channel(VOICE_CHANNEL_ID)
     if voiceChannel is None:
         await interaction.followup.send("找不到指定的語音頻道。")
         return
 
-    voiceClient = interaction.guild.voice_client
-    try:
-        if voiceClient is not None and voiceClient.is_connected():
-            if voiceClient.channel.id != voiceChannel.id:
-                await voiceClient.move_to(voiceChannel)
-        else:
-            if voiceClient is not None:
-                await voiceClient.disconnect(force=True)
-            voiceClient = await voiceChannel.connect(cls=voice_recv.VoiceRecvClient, timeout=15.0, reconnect=False)
-    except asyncio.TimeoutError:
-        await interaction.followup.send("連接語音頻道逾時，請稍後再試。")
-        return
-    except discord.ClientException as e:
-        print(f"voice connect client error: {e}")
-        await interaction.followup.send("語音連線狀態異常，請稍後再試。")
-        return
-    except Exception as e:
-        print(f"voice connect error: {e}")
-        if interaction.guild.voice_client is not None:
-            await interaction.guild.voice_client.disconnect(force=True)
-        await interaction.followup.send("語音連線失敗，已清理連線狀態，請再試一次。")
+    bot_member = interaction.guild.me or interaction.guild.get_member(bot.user.id)
+    if bot_member is None:
+        await interaction.followup.send("找不到琉璃在伺服器裡的成員資料。")
         return
 
+    permissions = voiceChannel.permissions_for(bot_member)
+    if not permissions.connect or not permissions.speak:
+        await interaction.followup.send("琉璃沒有進入或發話這個語音頻道的權限。")
+        return
+
+    async with voice_connect_lock:
+        voiceClient = interaction.guild.voice_client
+        try:
+            if voiceClient is not None and voiceClient.is_connected():
+                if voiceClient.channel.id != voiceChannel.id:
+                    await voiceClient.move_to(voiceChannel)
+            else:
+                if voiceClient is not None:
+                    await voiceClient.disconnect(force=True)
+                    await asyncio.sleep(1.0)
+
+                last_error = None
+                for attempt in range(2):
+                    try:
+                        voiceClient = await voiceChannel.connect(
+                            cls=voice_recv.VoiceRecvClient,
+                            timeout=VOICE_CONNECT_TIMEOUT,
+                            reconnect=True,
+                        )
+                        break
+                    except (asyncio.TimeoutError, discord.ClientException) as e:
+                        last_error = e
+                        print(f"voice connect attempt {attempt + 1} failed: {e}")
+                        if interaction.guild.voice_client is not None:
+                            await interaction.guild.voice_client.disconnect(force=True)
+                        await asyncio.sleep(1.0)
+                else:
+                    if isinstance(last_error, asyncio.TimeoutError):
+                        await interaction.followup.send("連接語音頻道逾時，已清理連線狀態，請再試一次。")
+                    else:
+                        await interaction.followup.send("語音連線狀態異常，已清理連線狀態，請再試一次。")
+                    return
+        except Exception as e:
+            print(f"voice connect error: {e}")
+            if interaction.guild.voice_client is not None:
+                await interaction.guild.voice_client.disconnect(force=True)
+            await interaction.followup.send("語音連線失敗，已清理連線狀態，請再試一次。")
+            return
+
     await interaction.followup.send("vc")
-    print(f"voice encryption mode: {voiceClient.mode}")
-    print(f"dave protocol version: {voiceClient._connection.dave_protocol_version}")
+    print(f"voice encryption mode: {getattr(voiceClient, 'mode', 'unknown')}")
+    print(f"dave protocol version: {getattr(voiceClient._connection, 'dave_protocol_version', 'unknown')}")
 
     audio_chunks = []
     silence_timer = None
@@ -407,9 +441,16 @@ async def vc(interaction: discord.Interaction):
         reset_silence_timer()
 
 
-    if (voiceClient is not None and not voiceClient.is_playing()):
+    if voiceClient is not None and voiceClient.is_connected():
         print(f"opus loaded before listen: {discord.opus.is_loaded()}")
-        voiceClient.listen(voice_recv.BasicSink(callback))
+        try:
+            if hasattr(voiceClient, "is_listening") and voiceClient.is_listening():
+                print("voice client is already listening")
+            else:
+                voiceClient.listen(voice_recv.BasicSink(callback))
+        except discord.ClientException as e:
+            print(f"voice listen error: {e}")
+            await interaction.followup.send("已連上語音頻道，但啟動收音時發生錯誤。")
 
 @bot.tree.command(name = "shutdown", description = "關閉琉璃")
 async def shutdown(interaction: discord.Interaction):

@@ -71,7 +71,7 @@ class LurieAI():
     
     def recognizeUser(self, name):
         if(name == "womiad"):
-            return "埃德"
+            return "womiad"
         else:
             return name
 
