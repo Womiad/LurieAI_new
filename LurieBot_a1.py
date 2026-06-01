@@ -14,14 +14,19 @@ import threading
 import LurieAI
 import asyncio
 import datetime
+import logging
 import re
+import random
 from openai import OpenAIError, RateLimitError
 from audio2mouth import audio2mouth
 from background_system import BackgroundGenerationSystem
 from fish_speech_api import fish_generate
+from PIL import Image
 
 from vits.generateApi import generate
 
+
+logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
 
 opus_path = Path(discord.__file__).parent / "bin" / "libopus-0.x64.dll"
 if not discord.opus.is_loaded() and opus_path.exists():
@@ -66,8 +71,13 @@ def _decode_packet_with_dave(self, packet):
                 )
             except Exception as e:
                 print(f"DAVE decrypt failed for user {user_id}: {e}")
+                return packet, b""
 
-    return _original_decode_packet(self, packet)
+    try:
+        return _original_decode_packet(self, packet)
+    except discord.opus.OpusError as e:
+        print(f"opus decode failed for ssrc {getattr(packet, 'ssrc', 'unknown')}: {e}")
+        return packet, b""
 
 
 voice_recv_opus.PacketDecoder._decode_packet = _decode_packet_with_dave
@@ -77,6 +87,9 @@ intents.members = True
 bot = commands.Bot(command_prefix="/", intents=intents)
 
 VOICE_CHANNEL_ID = 1196487874800013395
+LODGE_CHANNEL_ID = 1196487874800013394
+TEXT_CHAT_CHANNEL_IDS = {LODGE_CHANNEL_ID, 1212399293852291092}
+LOG_CHANNEL_ID = 1212309865305735188
 VOICE_CONNECT_TIMEOUT = 30.0
 voice_connect_lock = asyncio.Lock()
 
@@ -84,10 +97,115 @@ voice_connect_lock = asyncio.Lock()
 logMsg = ""
 isThinking = False
 backgroundSystem = None
+backgroundStartupTask = None
+backgroundRefreshTask = None
+photo_lock = asyncio.Lock()
 
 
 
 audio_playlist = []
+
+
+def _safe_channel_name(channel):
+    return getattr(channel, "name", str(getattr(channel, "id", "unknown")))
+
+
+def _latest_background_path():
+    if backgroundSystem is not None:
+        background_path = backgroundSystem.get_current_background_path()
+        if background_path is not None and background_path.exists():
+            return background_path
+
+    background_dir = Path("diffusion/backgrounds")
+    backgrounds = [path for path in background_dir.glob("*.png") if path.is_file()]
+    if not backgrounds:
+        return None
+    return max(backgrounds, key=lambda path: path.stat().st_mtime)
+
+
+def _create_photo_image():
+    background_path = _latest_background_path()
+    if background_path is None:
+        raise FileNotFoundError("找不到可用的背景圖片。")
+
+    lurie_dir = Path("lurie_png")
+    lurie_paths = sorted(path for path in lurie_dir.glob("*.png") if path.is_file())
+    if not lurie_paths:
+        raise FileNotFoundError("找不到 lurie_png 裡的角色圖片。")
+
+    lurie_path = random.choice(lurie_paths)
+    with Image.open(background_path).convert("RGBA") as background:
+        with Image.open(lurie_path).convert("RGBA") as lurie:
+            max_overlay_width = int(background.width * 0.45)
+            max_overlay_height = int(background.height * 0.55)
+            scale = min(
+                max_overlay_width / lurie.width,
+                max_overlay_height / lurie.height,
+                1.0,
+            )
+            overlay_size = (
+                max(1, int(lurie.width * scale)),
+                max(1, int(lurie.height * scale)),
+            )
+            lurie = lurie.resize(overlay_size, Image.Resampling.LANCZOS)
+
+            if lurie_path.name == "1.png":
+                position = (
+                    background.width - lurie.width,
+                    background.height - lurie.height,
+                )
+            elif lurie_path.name == "2.png":
+                position = ((background.width - lurie.width) // 2, background.height - lurie.height)
+            elif lurie_path.name == "3.png":
+                position = (0, background.height - lurie.height)
+            else:
+                position = (
+                    background.width - lurie.width,
+                    background.height - lurie.height,
+                )
+
+            background.alpha_composite(lurie, position)
+            output_dir = Path("diffusion/photos")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            output_path = output_dir / f"photo_{timestamp}_{lurie_path.stem}.png"
+            background.convert("RGB").save(output_path)
+
+    return output_path, background_path, lurie_path
+
+
+async def send_photo(channels, source_label):
+    async with photo_lock:
+        try:
+            photo_path, background_path, lurie_path = await asyncio.to_thread(_create_photo_image)
+        except Exception as e:
+            print(f"photo generation failed: {e}")
+            for channel in channels:
+                if channel is not None:
+                    await channel.send(f"拍照失敗：```{e}```")
+            return
+
+    sent_channel_ids = set()
+    content = (
+        f"拍照完成（{source_label}）\n"
+        f"背景：{background_path.name}\n"
+        f"角色：{lurie_path.name}"
+    )
+    for channel in channels:
+        if channel is None or channel.id in sent_channel_ids:
+            continue
+        sent_channel_ids.add(channel.id)
+        await channel.send(content=content, file=discord.File(str(photo_path)))
+
+
+def schedule_voice_photo(source_label):
+    channels = [
+        bot.get_channel(LOG_CHANNEL_ID),
+        bot.get_channel(LODGE_CHANNEL_ID),
+    ]
+    bot.loop.call_soon_threadsafe(
+        lambda: bot.loop.create_task(send_photo(channels, source_label))
+    )
 
 
 @bot.event
@@ -100,12 +218,50 @@ async def on_ready():
     global Lurie
     global LurieChannel
     global backgroundSystem
+    global backgroundStartupTask
+    global backgroundRefreshTask
 
-    LurieChannel = bot.get_channel(1196487874800013394)
+    LurieChannel = bot.get_channel(LODGE_CHANNEL_ID)
     print("online")
     Lurie = LurieAI.LurieAI()
     backgroundSystem = BackgroundGenerationSystem(openai_client=Lurie.client)
+    if backgroundStartupTask is None or backgroundStartupTask.done():
+        backgroundStartupTask = bot.loop.create_task(warm_up_startup_background())
+    if backgroundRefreshTask is None or backgroundRefreshTask.done():
+        backgroundRefreshTask = bot.loop.create_task(periodic_background_refresh())
     await LurieChannel.send("online")
+
+
+async def warm_up_startup_background():
+    if backgroundSystem is None:
+        return
+
+    destination_channel = bot.get_channel(backgroundSystem.config.log_channel_id)
+    print("背景模型預載與開機首張背景生成中...")
+    result = await backgroundSystem.generate_startup_background(
+        destination_channel=destination_channel,
+        source_label="開機預載",
+    )
+    if result is None:
+        print("背景模型預載完成，未產生開機背景")
+    else:
+        print(f"開機背景完成：{result.image_path}（{result.elapsed_seconds:.2f} 秒）")
+
+
+async def periodic_background_refresh():
+    while True:
+        if backgroundSystem is None:
+            await asyncio.sleep(1)
+            continue
+
+        await asyncio.sleep(backgroundSystem.config.refresh_interval_seconds)
+        if backgroundSystem is None:
+            continue
+
+        await backgroundSystem.refresh_from_conversation(
+            notify_discord=False,
+            source_label="場景自動刷新",
+        )
 
 
 def schedule_background_generation(user_text, response_text, source_label, destination_channel=None):
@@ -115,6 +271,7 @@ def schedule_background_generation(user_text, response_text, source_label, desti
     if destination_channel is None:
         destination_channel = bot.get_channel(backgroundSystem.config.log_channel_id)
     context_messages = Lurie.get_recent_messages()
+    backgroundSystem.remember_conversation(context_messages, user_text, response_text)
     coroutine = backgroundSystem.generate_for_discord(
         context_messages=context_messages,
         user_text=user_text,
@@ -130,11 +287,15 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    if ((message.channel.id==1196487874800013394 or message.channel.id==1212399293852291092) == False):
+    if message.channel.id not in TEXT_CHAT_CHANNEL_IDS:
         return
     
     global isThinking
     channel = message.channel
+
+    if "拍照" in message.content:
+        await send_photo([channel], f"文字頻道 #{_safe_channel_name(channel)}")
+        return
 
     if (isThinking==True):
         await channel.send(content="琉璃現在在忙喔")
@@ -315,7 +476,7 @@ async def vc(interaction: discord.Interaction):
             audio = r.record(source)
 
         
-        LogChannel = bot.get_channel(1212309865305735188)
+        LogChannel = bot.get_channel(LOG_CHANNEL_ID)
 
         try:
             stt_result = r.recognize_google(audio, show_all=True, language='zh-TW')
@@ -324,6 +485,11 @@ async def vc(interaction: discord.Interaction):
             result = stt_result["alternative"][0]["transcript"]
             user = Lurie.recognizeUser(interaction.user.name) + "："
             print(user + result)
+
+            if "拍照" in result:
+                isThinking = False
+                schedule_voice_photo(f"語音頻道 {interaction.user.name}")
+                return
 
             global getSttTime
             getSttTime = datetime.datetime.now()
@@ -430,6 +596,8 @@ async def vc(interaction: discord.Interaction):
 
         nonlocal audio_chunks
         raw_data = data.pcm
+        if not raw_data:
+            return
 
         audio_chunk = AudioSegment(
             data = raw_data,
