@@ -176,7 +176,8 @@ class BackgroundGenerationSystem:
                     self._startup_seed(),
                 )
                 if self._viewer is not None:
-                    self._viewer.show(result.image_path)
+                    if not self._viewer.show(result.image_path, wait=True, timeout=5.0):
+                        raise RuntimeError("背景視窗顯示失敗")
                 await self._send_result(destination_channel, result, source_label)
                 return result
             except Exception as exc:
@@ -194,6 +195,11 @@ class BackgroundGenerationSystem:
         self._latest_context_messages = list(context_messages)
         self._latest_user_text = user_text
         self._latest_response_text = response_text
+
+    def reset_conversation(self):
+        self._latest_context_messages = []
+        self._latest_user_text = ""
+        self._latest_response_text = ""
 
     def get_current_background_path(self) -> Path | None:
         if self._viewer is not None and self._viewer.current_image_path is not None:
@@ -704,10 +710,18 @@ class BackgroundImageViewer:
         self._thread = threading.Thread(target=self._run, name="LurieBackgroundViewer", daemon=True)
         self._thread.start()
 
-    def show(self, image_path: Path):
+    def show(self, image_path: Path, wait: bool = False, timeout: float = 5.0):
         self._current_image_path = Path(image_path)
-        self._updates.put(self._current_image_path)
+        ack = None
+        if wait:
+            ack = {"event": threading.Event(), "ok": False}
+        self._updates.put((self._current_image_path, ack))
         print(f"背景視窗準備顯示：{self._current_image_path}")
+        if ack is None:
+            return True
+        if not ack["event"].wait(timeout):
+            return False
+        return bool(ack["ok"])
 
     @property
     def current_image_path(self) -> Path | None:
@@ -725,9 +739,6 @@ class BackgroundImageViewer:
         root.title(self.title)
         root.geometry("960x540")
         root.configure(background="black")
-        root.lift()
-        root.attributes("-topmost", True)
-        root.after(1500, lambda: root.attributes("-topmost", False))
 
         label = tk.Label(root, background="black")
         label.pack(fill="both", expand=True)
@@ -741,32 +752,42 @@ class BackgroundImageViewer:
             height = max(root.winfo_height(), 1)
             image = label.source_image.copy()
             image.thumbnail((width, height), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(image)
-            label.configure(image=photo)
-            label.image_ref = photo
+            photo = ImageTk.PhotoImage(image, master=root)
+            try:
+                label.configure(image=photo)
+                label.image_ref = photo
+            except tk.TclError as exc:
+                print(f"background viewer render failed: {exc}")
 
         def load_image(latest_path):
             try:
                 label.source_image = Image.open(latest_path).convert("RGB")
                 render_current_image()
                 root.deiconify()
-                root.lift()
-                root.focus_force()
-                root.attributes("-topmost", True)
-                root.after(1500, lambda: root.attributes("-topmost", False))
+                return True
             except Exception as exc:
                 print(f"background viewer update failed: {exc}")
+                return False
 
         def poll_updates():
             latest_path = self._current_image_path
+            latest_ack = None
             while True:
                 try:
-                    latest_path = self._updates.get_nowait()
+                    update = self._updates.get_nowait()
                 except queue.Empty:
                     break
+                if isinstance(update, tuple):
+                    latest_path, latest_ack = update
+                else:
+                    latest_path = update
+                    latest_ack = None
 
             if latest_path is not None:
-                load_image(latest_path)
+                loaded = load_image(latest_path)
+                if latest_ack is not None:
+                    latest_ack["ok"] = loaded
+                    latest_ack["event"].set()
                 self._current_image_path = None
 
             root.after(250, poll_updates)

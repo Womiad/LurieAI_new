@@ -15,6 +15,7 @@ import LurieAI
 import asyncio
 import datetime
 import logging
+import queue
 import re
 import random
 from openai import OpenAIError, RateLimitError
@@ -100,10 +101,103 @@ backgroundSystem = None
 backgroundStartupTask = None
 backgroundRefreshTask = None
 photo_lock = asyncio.Lock()
+RESET_MEMORY_TRIGGERS = {"重置記憶", "reset記憶", "reset memory", "/reset_memory", "/reset"}
+qrCodeViewer = None
 
 
 
 audio_playlist = []
+
+
+class QRCodeViewer:
+    def __init__(self, title="Lurie Photo QRCode"):
+        self.title = title
+        self._updates = queue.Queue()
+        self._thread = None
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="LurieQRCodeViewer", daemon=True)
+        self._thread.start()
+
+    def show_url(self, url):
+        if not url:
+            return
+        self._updates.put(url)
+        print(f"QRCode 視窗準備顯示圖片網址：{url}")
+
+    def _make_qr_image(self, url, size=420, padding=32):
+        from PIL import Image
+        import qrcode
+
+        qr_image = qrcode.make(url).convert("L")
+        qr_size = max(1, size - padding * 2)
+        qr_image = qr_image.resize((qr_size, qr_size), Image.Resampling.NEAREST)
+
+        canvas = Image.new("RGB", (size, size), "white")
+        canvas.paste(qr_image.convert("RGB"), (padding, padding))
+        return canvas
+
+    def _run(self):
+        try:
+            import tkinter as tk
+            from PIL import ImageTk
+        except Exception as exc:
+            print(f"QRCode viewer disabled: {exc}")
+            return
+
+        green = "#00ff00"
+        root = tk.Tk()
+        root.title(self.title)
+        root.geometry("480x480")
+        root.configure(background=green)
+
+        label = tk.Label(root, background=green, borderwidth=0, highlightthickness=0)
+        label.pack(fill="both", expand=True)
+        label.image_ref = None
+        label.source_image = None
+
+        def render_current_image():
+            if label.source_image is None:
+                label.configure(image="")
+                label.image_ref = None
+                return
+            width = max(root.winfo_width(), 1)
+            height = max(root.winfo_height(), 1)
+            image = label.source_image.copy()
+            image.thumbnail((width, height), Image.Resampling.NEAREST)
+            photo = ImageTk.PhotoImage(image, master=root)
+            try:
+                label.configure(image=photo)
+                label.image_ref = photo
+            except tk.TclError as exc:
+                print(f"QRCode viewer render failed: {exc}")
+
+        def show_url(url):
+            try:
+                label.source_image = self._make_qr_image(url)
+                render_current_image()
+                root.deiconify()
+            except Exception as exc:
+                print(f"QRCode viewer update failed: {exc}")
+
+        def poll_updates():
+            latest_url = None
+            while True:
+                try:
+                    latest_url = self._updates.get_nowait()
+                except queue.Empty:
+                    break
+
+            if latest_url is not None:
+                show_url(latest_url)
+
+            root.after(250, poll_updates)
+
+        root.bind("<Configure>", lambda _event: render_current_image())
+        root.after(250, poll_updates)
+        root.mainloop()
 
 
 def _safe_channel_name(channel):
@@ -195,7 +289,9 @@ async def send_photo(channels, source_label):
         if channel is None or channel.id in sent_channel_ids:
             continue
         sent_channel_ids.add(channel.id)
-        await channel.send(content=content, file=discord.File(str(photo_path)))
+        sent_message = await channel.send(content=content, file=discord.File(str(photo_path)))
+        if qrCodeViewer is not None and sent_message.attachments:
+            qrCodeViewer.show_url(sent_message.attachments[0].url)
 
 
 def schedule_voice_photo(source_label):
@@ -220,21 +316,31 @@ async def on_ready():
     global backgroundSystem
     global backgroundStartupTask
     global backgroundRefreshTask
+    global qrCodeViewer
 
     LurieChannel = bot.get_channel(LODGE_CHANNEL_ID)
-    print("online")
+    print("啟動discord bot......")
+    await LurieChannel.send("啟動discord bot......")
     Lurie = LurieAI.LurieAI()
+    if qrCodeViewer is None:
+        qrCodeViewer = QRCodeViewer()
+    qrCodeViewer.start()
+    await LurieChannel.send("啟動背景系統......")
     backgroundSystem = BackgroundGenerationSystem(openai_client=Lurie.client)
     if backgroundStartupTask is None or backgroundStartupTask.done():
         backgroundStartupTask = bot.loop.create_task(warm_up_startup_background())
+    startup_result = await backgroundStartupTask
     if backgroundRefreshTask is None or backgroundRefreshTask.done():
         backgroundRefreshTask = bot.loop.create_task(periodic_background_refresh())
-    await LurieChannel.send("online")
+    if startup_result is None:
+        await LurieChannel.send("背景系統啟動，但初始背景尚未顯示成功。")
+        return
+    await LurieChannel.send("召喚成功！可以開始對話！")
 
 
 async def warm_up_startup_background():
     if backgroundSystem is None:
-        return
+        return None
 
     destination_channel = bot.get_channel(backgroundSystem.config.log_channel_id)
     print("背景模型預載與開機首張背景生成中...")
@@ -246,6 +352,7 @@ async def warm_up_startup_background():
         print("背景模型預載完成，未產生開機背景")
     else:
         print(f"開機背景完成：{result.image_path}（{result.elapsed_seconds:.2f} 秒）")
+    return result
 
 
 async def periodic_background_refresh():
@@ -282,6 +389,13 @@ def schedule_background_generation(user_text, response_text, source_label, desti
     bot.loop.call_soon_threadsafe(lambda: bot.loop.create_task(coroutine))
 
 
+def reset_lurie_memory():
+    greeting = Lurie.reset_memory()
+    if backgroundSystem is not None:
+        backgroundSystem.reset_conversation()
+    return greeting
+
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -292,6 +406,12 @@ async def on_message(message):
     
     global isThinking
     channel = message.channel
+    normalized_content = message.content.strip().lower()
+
+    if normalized_content in RESET_MEMORY_TRIGGERS:
+        response = reset_lurie_memory()
+        await channel.send(response)
+        return
 
     if "拍照" in message.content:
         await send_photo([channel], f"文字頻道 #{_safe_channel_name(channel)}")
@@ -329,6 +449,17 @@ async def on_message(message):
         f"文字頻道 #{message.channel.name}",
         destination_channel=message.channel,
     )
+
+@bot.tree.command(name = "reset_memory", description = "重置琉璃記憶並回到初次問候")
+async def reset_memory(interaction: discord.Interaction):
+    global isThinking
+
+    if isThinking == True:
+        await interaction.response.send_message("琉璃現在在忙喔")
+        return
+
+    response = reset_lurie_memory()
+    await interaction.response.send_message(response)
 
 @bot.tree.command(name = "say", description = "叫琉璃說話")
 async def say(interaction: discord.Interaction, text: str):

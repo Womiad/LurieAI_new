@@ -29,13 +29,13 @@ class LurieAI():
         f.close()
 
         configPrompt = systemPrompt.replace("[personality]",personality).replace("[charactors]",charactors) # charactors為認人用，暫不實裝
-        self.msg = [
-            {
-                "role": "system",
-                "name": "Lurie",
-                "content": configPrompt
-            },
-        ]
+        self.system_message = {
+            "role": "system",
+            "name": "Lurie",
+            "content": configPrompt
+        }
+        self.initial_greeting = "你好，歡迎來到異世界旅遊團。\n我是你今天的導遊。\n準備好跟我一起暢遊異世界了嗎？"
+        self.reset_memory()
 
     def _stream_response(self, model):
         stream = self.client.chat.completions.create(
@@ -68,6 +68,10 @@ class LurieAI():
 
     def get_recent_messages(self):
         return list(self.msg)
+
+    def reset_memory(self):
+        self.msg = [self.system_message.copy()]
+        return self.initial_greeting
     
     def recognizeUser(self, name):
         if(name == "womiad"):
